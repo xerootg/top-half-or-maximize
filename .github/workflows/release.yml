@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get current version
+        id: get_version
+        run: |
+          CURRENT_VERSION=$(jq -r '.KPlugin.Version' metadata.json)
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if release exists
+        id: check_release
+        run: |
+          VERSION="${{ steps.get_version.outputs.current_version }}"
+          if git tag -l | grep -q "^v${VERSION}$"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Increment version if release exists
+        id: new_version
+        run: |
+          VERSION="${{ steps.get_version.outputs.current_version }}"
+          if [ "${{ steps.check_release.outputs.exists }}" == "true" ]; then
+            # Increment the patch version
+            IFS='.' read -ra PARTS <<< "$VERSION"
+            if [ ${#PARTS[@]} -eq 1 ]; then
+              NEW_VERSION="${PARTS[0]}.1"
+            elif [ ${#PARTS[@]} -eq 2 ]; then
+              NEW_VERSION="${PARTS[0]}.$((PARTS[1] + 1))"
+            else
+              NEW_VERSION="${PARTS[0]}.${PARTS[1]}.$((PARTS[2] + 1))"
+            fi
+            echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "incremented=true" >> $GITHUB_OUTPUT
+          else
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "incremented=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update metadata.json version
+        if: steps.new_version.outputs.incremented == 'true'
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.version }}"
+          jq --arg v "$NEW_VERSION" '.KPlugin.Version = $v' metadata.json > metadata.tmp.json
+          mv metadata.tmp.json metadata.json
+
+      - name: Commit and push version update
+        if: steps.new_version.outputs.incremented == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add metadata.json
+          git commit -m "Bump version to ${{ steps.new_version.outputs.version }} [skip ci]"
+          git push
+
+      - name: Create release zip
+        id: create_zip
+        run: |
+          VERSION="${{ steps.new_version.outputs.version }}"
+          ZIP_NAME="xeros-tiling-window-manager-v${VERSION}.zip"
+          zip -r "$ZIP_NAME" . -x ".git/*" -x ".github/*"
+          echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.new_version.outputs.version }}
+          name: v${{ steps.new_version.outputs.version }}
+          files: ${{ steps.create_zip.outputs.zip_name }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
